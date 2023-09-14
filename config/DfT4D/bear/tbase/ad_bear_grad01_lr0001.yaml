@@ -1,0 +1,85 @@
+seed: 1
+dataset_name: DfT4D
+data_dir: ./data/DfT4D/
+work_dir: ./work_dir/
+latent_dim: 1  # 1 because only scalar time is used
+num_workers: 0 # 16
+
+dataset:
+    module_name: temp_sdf_dataset
+    class_name: TempSdfDataset
+    dataset_name: ${dataset_name}
+    data_dir: ${data_dir}
+
+    sdf_dir: ${data_dir}/registrations_processed_sal_sigma03/
+
+    with_raw_mesh: True
+    raw_mesh_dir: ${data_dir}/registrations/
+
+    with_registration: False
+    registration_dir: ${data_dir}/registrations/
+
+    template_path: ${data_dir}/registrations/bear/pose/00000.obj # template
+    num_samples: 8192
+    split_cfg:
+        train: train_16.json # split
+        test: train_16.json # split
+
+model: 
+    sdf:
+        module_name: implicit_ad
+        class_name: ImplicitGenerator
+        auto_decoder: True
+        encoder: None
+        decoder:
+            latent_size: 1
+            dims : [ 512, 512, 512, 512, 512, 512, 512, 512 ]
+            norm_layers : [0, 1, 2, 3, 4, 5, 6, 7]
+            latent_in : [4]
+            weight_norm : True
+            xyz_dim : 3
+
+loss:
+    ###### sdf ######
+    # SDF loss
+    sdf_weight: 1.0
+    sdf_loss_type: 'L1'
+    # sdf grad loss
+    grad_loss_weight: 0.1
+    # sdf surfafe ARAP loss
+    use_sdf_asap_epoch: 1000000
+    simplify_mesh: True
+    implicit_reg_type: 'dense_inverse'
+    sample_latent_space: True
+    sample_latent_space_type: 'line' # normal, line
+    sdf_asap_weight: 0.001
+    weight_asap: 0
+    mu_asap: 0.0001
+    add_mu_diag_to_hessian: True
+    sdf_grid_size: 50
+    x_range: [-0.7, 0.4]
+    y_range: [-1.1, 1.1]
+    z_range: [-0.8, 0.7]
+
+
+optimization:
+    sdf:
+        batch_size: 8
+        lr: 0.001
+        gammas:     [ 0.5,  0.5,  0.5,  0.5,  0.5,  0.5,  0.5]
+        milestones: [1000, 2000, 3000, 4000, 5000, 6000, 7000]
+        num_epochs: 10001
+        
+        lat_vecs: # currently not used because we do not have leanable latents
+            # lr: 0.005
+            test_lr: 0.001 # 0.005
+            test_lr_decay: 0.1
+            test_decay_step: 400
+            num_test_epochs: 801
+    
+log:
+    log_batch_interval: 100
+    save_epoch_interval: 500
+    save_latest_epoch_interval: 100
+
+
