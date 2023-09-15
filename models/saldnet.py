@@ -6,6 +6,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import distributions as dist
 
+from models.encoder import get_encoder
+
 
 def maxpool(x, dim=-1, keepdim=False):
     out, _ = x.max(dim=dim, keepdim=keepdim)
@@ -78,12 +80,20 @@ class ImplicitMap(nn.Module):
         xyz_dim=3,
         geometric_init=True,
         beta=100,
+        use_encoder=False,
+        encoder=None,
         **kwargs
     ):
         super().__init__()
 
         bias = 1.0
         self.latent_size = latent_size
+
+        self.use_encoder = use_encoder
+        if use_encoder:
+            self.encoder, xyz_dim = get_encoder(encoder)
+
+
         last_out_dim = 1
         dims = [latent_size + xyz_dim] + list(dims) + [last_out_dim]
         self.d_in = latent_size + xyz_dim
@@ -134,7 +144,10 @@ class ImplicitMap(nn.Module):
             inputs_con = latent
         else:
             raise AssertionError
-
+        # import ipdb; ipdb.set_trace()
+        if self.use_encoder:
+            inputs = self.encoder(inputs)
+        
         x = torch.cat([inputs, inputs_con], dim=-1) # (B, N, din + 3) or (N1+...+NB, din+3)
 
         to_cat = x

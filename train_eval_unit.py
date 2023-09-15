@@ -55,6 +55,8 @@ def interp_from_lat_vecs(state_info, config, interp_loader, model, interp_lat_ve
     model.eval()
     device = state_info['device']
 
+    # import ipdb; ipdb.set_trace()
+
     if config.split == 'train':
         src_fid = config.get('interp_src_fid', None)  # 'bear-pose-00010'
         tgt_fid = config.get('interp_tgt_fid', None)  # 'bear-pose-00011'
@@ -111,6 +113,4 @@ def interp_from_lat_vecs(state_info, config, interp_loader, model, interp_lat_ve
 
     _copy_raw_mesh(src_fid, src_idx)
     _copy_raw_mesh(tgt_fid, tgt_idx)
-
-
 

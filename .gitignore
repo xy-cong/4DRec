@@ -4,3 +4,8 @@ __pycache__
 */__pycache__
 */*/__pycache__
 registration/multiCorres_sync_dfaust1k/multi_condor/*
+data/DfT4D/full_global_w_normal_obj
+data/DfT4D/partial_2
+data/DfT4D/partial_global_w_normal_obj
+old_work_dir/
+work_dir/

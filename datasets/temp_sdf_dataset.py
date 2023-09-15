@@ -170,14 +170,14 @@ class TempSdfDataset(torch.utils.data.Dataset):
             data_dict['normals_mnfld'] = normal_set_mnfld
             data_dict['samples_nonmnfld'] = samples_nonmnfld
 
-            # load mesh data
-            raw_mesh = trimesh.load(f"{self.raw_mesh_dir}/{fname}.obj", process=False, maintain_order=True)
-            data_dict['raw_mesh_verts'] = np.asarray(raw_mesh.vertices).astype(np.float32)
-            data_dict['raw_mesh_faces'] = np.asarray(raw_mesh.faces)
+            # # load mesh data
+            # raw_mesh = trimesh.load(f"{self.raw_mesh_dir}/{fname}.obj", process=False, maintain_order=True)
+            # data_dict['raw_mesh_verts'] = np.asarray(raw_mesh.vertices).astype(np.float32)
+            # data_dict['raw_mesh_faces'] = np.asarray(raw_mesh.faces)
 
             # temporal time step
             data_dict['time'] = torch.FloatTensor([idx / self.num_data]).reshape(-1)
-
+            # import ipdb; ipdb.set_trace()
         return data_dict
 
 

@@ -1,7 +1,7 @@
 seed: 1
-dataset_name: DfT4D
-data_dir: ./data/DfT4D/
-work_dir: ./work_dir/
+dataset_name: partial_2
+data_dir: ./data/DfT4D/${dataset_name}/
+work_dir: ./work_dir/${dataset_name}/
 latent_dim: 1  # 1 because only scalar time is used
 num_workers: 0 # 16
 
@@ -19,7 +19,7 @@ dataset:
     with_registration: False
     registration_dir: ${data_dir}/registrations/
 
-    template_path: ${data_dir}/registrations/bear/pose/00000.obj # template
+    template_path: ${data_dir}/registrations/bear/pose/00025.obj # template
     num_samples: 8192
     split_cfg:
         train: train_16.json # split
@@ -30,7 +30,6 @@ model:
         module_name: implicit_ad
         class_name: ImplicitGenerator
         auto_decoder: True
-        encoder: None
         decoder:
             latent_size: 1
             dims : [ 512, 512, 512, 512, 512, 512, 512, 512 ]
@@ -38,7 +37,11 @@ model:
             latent_in : [4]
             weight_norm : True
             xyz_dim : 3
-
+            use_encoder: False
+            encoder:
+                type: 'frequency'
+                input_dim: 3
+                freq: 10
 loss:
     ###### sdf ######
     # SDF loss
@@ -46,7 +49,7 @@ loss:
     sdf_loss_type: 'L1'
     # sdf grad loss
     grad_loss_weight: 0.1
-    # sdf surfafe ARAP loss
+    # sdf surface ARAP loss
     use_sdf_asap_epoch: 1000000
     simplify_mesh: True
     implicit_reg_type: 'dense_inverse'
@@ -64,7 +67,7 @@ loss:
 
 optimization:
     sdf:
-        batch_size: 8
+        batch_size: 16
         lr: 0.001
         gammas:     [ 0.5,  0.5,  0.5,  0.5,  0.5,  0.5,  0.5]
         milestones: [1000, 2000, 3000, 4000, 5000, 6000, 7000]
