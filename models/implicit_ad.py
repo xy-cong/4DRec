@@ -6,12 +6,20 @@ import trimesh
 import numpy as np
 
 from models.saldnet import ImplicitMap
+from models.color_saldnet import Implicit_Color_Map
+from models.NGPnet import NGP
 from utils.diff_operators import gradient
 from utils import implicit_utils
 from utils.time_utils import *
 from models.asap import compute_asap3d_sparse
 
 import torch_sparse as ts
+
+from torch.cuda.amp import autocast
+
+# import topologylayer.nn
+from topologylayer.nn import BatchedLevelSetLayer3D
+from pytorch3d.loss import chamfer_distance
 
 
 class ImplicitGenerator(nn.Module):
@@ -28,9 +36,21 @@ class ImplicitGenerator(nn.Module):
         self.latent_size = self.model_cfg.decoder.latent_size
 
         assert(self.auto_decoder)
-        self.decoder = ImplicitMap(**self.model_cfg.decoder)
+        use_NGP = self.model_cfg.get('use_NGP', False)
+        use_colornet = self.model_cfg.get('use_colornet', False)
+        if use_NGP:
+            self.decoder = NGP(**self.model_cfg.decoder)
+        elif use_colornet:
+            self.decoder = Implicit_Color_Map(**self.model_cfg.decoder)
+        else:
+            self.decoder = ImplicitMap(**self.model_cfg.decoder)  
+        
 
-
+        if config.loss.topology_PD_loss:
+            # self.meshgrid_size = self.config.loss.sdf_grid_size
+            self.meshgrid_size = self.config.loss.topo.meshgrid_size
+            self.topology_PD_loss = BatchedLevelSetLayer3D(size=(self.meshgrid_size,self.meshgrid_size,self.meshgrid_size), sublevel=False)
+    
     def forward(self, latent, batch_dict, config, state_info=None, only_encoder_forward=False, only_decoder_forward=False):
         '''
         Args:
@@ -39,7 +59,7 @@ class ImplicitGenerator(nn.Module):
             latent is generated from encoder or nn.Parameter that can be initialized
         '''
         assert(latent is None)
-
+        # import ipdb; ipdb.set_trace()
         points_mnfld = batch_dict['points_mnfld'] # (B, S, 3)
         normals_mnfld = batch_dict['normals_mnfld'] # (B, S, 3)
         points_nonmnfld = batch_dict['samples_nonmnfld'][:, :, :3].clone().detach().requires_grad_(True) # (B, S, 3)
@@ -51,13 +71,85 @@ class ImplicitGenerator(nn.Module):
         batch_dict['points_nonmnfld'] = points_nonmnfld # (B, S, 3)
         batch_dict['sdf_nonmnfld'] = sdf_nonmnfld # (B, S, 1)
 
+        points_nonmnfld = batch_dict['off_surface_points'][:, :, :3].clone().detach().requires_grad_(True) # (B, S, 3) 
+        off_sdf = self.decoder(points_nonmnfld, latent)[...,:1]
+        batch_dict['off_sdf'] = off_sdf # (B, S, 1)
+
         if state_info is not None:
-            self.get_loss(latent, batch_dict, config, state_info)
+            if not config.train_from_sdfnet_init:
+                self.get_loss(latent, batch_dict, config, state_info)
+            else:
+                self.get_color_loss(latent, batch_dict, config, state_info)
 
         return batch_dict
 
+    def get_color_loss(self, latent, batch_dict, config, state_info):
+        epoch = state_info['epoch']
+        device = batch_dict['points_mnfld'].device
+        loss = torch.zeros(1, device=device) 
+        if config.use_colorsdf> 0:
+            color_loss_type = config.loss.get('color_loss_type', 'L1')
+            if color_loss_type == 'L1':
+                color_loss = F.l1_loss(batch_dict['sdf_nonmnfld'][:, :, 1:4], batch_dict['samples_nonmnfld'][:, :, 6:9]) # 采样的GT就是udf
+                color_loss = color_loss * config.loss.color_weight
+            else:
+                raise NotImplementedError
+         
+            loss += color_loss
+            batch_dict['color_loss'] = color_loss
+            state_info['color_loss'] = color_loss.item()
+        # if config.use_EDR and config.loss.EDR_loss_weight > 0:
+        #     # import ipdb; ipdb.set_trace()
+        #     rand_coords = torch.rand_like(batch_dict['samples_nonmnfld'][:, :, :3]) * 2 - 1
+        #     rand_coords_offset = rand_coords + torch.randn_like(rand_coords) * 1e-2
+        #     EDR_batch_dict = {
+        #         'EDR_samples': rand_coords,
+        #         'time': batch_dict['time']
+        #     }
+        #     color_1 = self.get_color_EDR_loss(EDR_batch_dict)
+
+        #     EDR_batch_dict = {
+        #         'EDR_samples': rand_coords_offset,
+        #         'time': batch_dict['time']
+        #     }
+        #     color_2 = self.get_color_EDR_loss(EDR_batch_dict)
+            
+        #     # EDR_loss = nn.functional.mse_loss(color_1, color_2)
+        #     EDR_loss = F.l1_loss(color_1, color_2)
+        #     EDR_loss = EDR_loss * config.loss.EDR_loss_weight
+        #     loss += EDR_loss
+        #     batch_dict['EDR_loss'] = EDR_loss
+        #     state_info['EDR_loss'] = EDR_loss.item()
+
+        # if config.use_sdf_grad and config.loss.grad_loss_weight > 0:
+        #     # import ipdb; ipdb.set_trace()
+        #     color_grad_nonmnfld = gradient(batch_dict['sdf_nonmnfld'][...,1:4], batch_dict['points_nonmnfld']) # (B, S, 3)
+        #     sdf_normals_nonmnfld_gt = batch_dict['samples_nonmnfld'][:, :, 3:6] # (B, S, 3)
+        #     grad_loss = ((color_grad_nonmnfld * sdf_normals_nonmnfld_gt).sum(-1) ** 2).mean()
+        #     grad_loss = grad_loss * config.loss.grad_loss_weight
+        #     loss += grad_loss
+        #     batch_dict['grad_loss'] = grad_loss
+        #     state_info['grad_loss'] = grad_loss.item()
+
+        batch_dict["loss"] = loss
+
+    def get_color_EDR_loss(self, batch_dict):
+        # import ipdb; ipdb.set_trace()
+        latent = batch_dict['time']
+        points = batch_dict['EDR_samples'].clone().detach().requires_grad_(True)
+        sdf = self.decoder(points, latent)
+
+        return sdf[..., 1:]
+    def get_EDR_loss(self, batch_dict):
+        # import ipdb; ipdb.set_trace()
+        latent = batch_dict['time']
+        points = batch_dict['EDR_samples'].clone().detach().requires_grad_(True)
+        sdf = self.decoder(points, latent)
+
+        return sdf.reshape(-1)    
 
     def get_loss(self, latent, batch_dict, config, state_info):
+        # import ipdb; ipdb.set_trace()
         epoch = state_info['epoch']
         device = batch_dict['points_mnfld'].device
         loss = torch.zeros(1, device=device) 
@@ -66,16 +158,30 @@ class ImplicitGenerator(nn.Module):
         # sdf loss
         sdf_loss_type = config.loss.get('sdf_loss_type', 'L1')
         if sdf_loss_type == 'L1':
-            sdf_loss = F.l1_loss(batch_dict['sdf_nonmnfld'][:, :, 0].abs(), batch_dict['samples_nonmnfld'][:, :, -1])
+            sdf_loss = F.l1_loss(batch_dict['sdf_nonmnfld'][:, :, 0].abs(), batch_dict['samples_nonmnfld'][:, :, -1]) # 采样的GT就是udf
             sdf_loss = sdf_loss * config.loss.sdf_weight
         else:
             raise NotImplementedError
-
         loss += sdf_loss
         batch_dict['sdf_loss'] = sdf_loss
         state_info['sdf_loss'] = sdf_loss.item()
 
+        # color loss
+        
+        if config.use_colorsdf> 0:
+            color_loss_type = config.loss.get('color_loss_type', 'L1')
+            if color_loss_type == 'L1':
+                color_loss = F.l1_loss(batch_dict['sdf_nonmnfld'][:, :, 1:4], batch_dict['samples_nonmnfld'][:, :, 6:9]) # 采样的GT就是udf
+                color_loss = color_loss * config.loss.color_weight
+            else:
+                raise NotImplementedError
+         
+            loss += color_loss
+            batch_dict['color_loss'] = color_loss
+            state_info['color_loss'] = color_loss.item()
+
         # grad loss
+        # import ipdb; ipdb.set_trace()
         if config.use_sdf_grad and config.loss.grad_loss_weight > 0:
             grad_nonmnfld = gradient(batch_dict['sdf_nonmnfld'], batch_dict['points_nonmnfld']) # (B, S, 3)
             normals_nonmnfld_gt = batch_dict['samples_nonmnfld'][:, :, 3:6] # (B, S, 3)
@@ -86,6 +192,53 @@ class ImplicitGenerator(nn.Module):
             loss += grad_loss
             batch_dict['grad_loss'] = grad_loss
             state_info['grad_loss'] = grad_loss.item()
+
+            if config.loss.eikonal_loss_weight>0:
+                eikonal_loss = torch.abs(torch.norm(grad_nonmnfld, dim=-1)-1.).mean()
+                eikonal_loss = eikonal_loss * config.loss.eikonal_loss_weight
+                loss += eikonal_loss
+                batch_dict['eikonal_loss'] = eikonal_loss
+                state_info['eikonal_loss'] = eikonal_loss.item()
+        
+        # import ipdb; ipdb.set_trace()
+        if config.loss.offsurface_loss_weight>0:
+            off_sdf = batch_dict['off_sdf'][:, :, 0]
+            inter_constraint_loss = torch.exp(-1e2 * torch.abs(off_sdf)).mean()
+            inter_constraint_loss = inter_constraint_loss * config.loss.offsurface_loss_weight
+            loss += inter_constraint_loss
+            batch_dict['inter_constraint_loss'] = inter_constraint_loss
+            state_info['inter_constraint_loss'] = inter_constraint_loss.item()
+        # EDR loss
+        if config.use_EDR and config.loss.EDR_loss_weight > 0:
+            # import ipdb; ipdb.set_trace()
+            rand_coords = torch.rand_like(batch_dict['samples_nonmnfld'][:, :, :3]) * 2 - 1
+            rand_coords_offset = rand_coords + torch.randn_like(rand_coords) * 1e-2
+            EDR_batch_dict = {
+                'EDR_samples': rand_coords,
+                'time': batch_dict['time']
+            }
+            sdf_1 = self.get_EDR_loss(EDR_batch_dict)
+
+            EDR_batch_dict = {
+                'EDR_samples': rand_coords_offset,
+                'time': batch_dict['time']
+            }
+            sdf_2 = self.get_EDR_loss(EDR_batch_dict)
+            
+            # EDR_loss = nn.functional.mse_loss(sdf_1, sdf_2)
+            EDR_loss = F.l1_loss(sdf_1, sdf_2)
+            EDR_loss = EDR_loss * config.loss.EDR_loss_weight
+            loss += EDR_loss
+            batch_dict['EDR_loss'] = EDR_loss
+            state_info['EDR_loss'] = EDR_loss.item()
+            
+        if config.use_topo_PD:
+            # import ipdb; ipdb.set_trace()
+            sdf_topo_loss = self.get_PD_loss(batch_dict['time'])
+            sdf_topo_loss = sdf_topo_loss * config.loss.topo.PD_loss_weight
+            loss += sdf_topo_loss
+            batch_dict['sdf_topo_loss'] = sdf_topo_loss
+            state_info['sdf_topo_loss'] = sdf_topo_loss.item()
 
         # sdf asap loss
         if config.use_sdf_asap:
@@ -109,13 +262,62 @@ class ImplicitGenerator(nn.Module):
                 batch_vecs = latent # (B, d)
 
             sdf_asap_loss = self.get_sdf_asap_loss(batch_vecs, config.loss, batch_dict=batch_dict)
-            sdf_asap_loss = sdf_asap_loss.mean() * config.loss.sdf_asap_weight
+            # sdf_asap_loss = sdf_asap_loss.mean() * config.loss.sdf_asap_weight
+            # import ipdb; ipdb.set_trace()
+            sdf_asap_weight = torch.ones_like(batch_vecs, device=device)*0.001
+            sdf_asap_weight[batch_vecs<0.5] = 0.01
+            sdf_asap_weight[batch_vecs>(185 / 199)] = 0.01
+            sdf_asap_loss = (sdf_asap_loss * sdf_asap_weight).mean()
+            
+
             loss += sdf_asap_loss
             batch_dict['sdf_asap_loss'] = sdf_asap_loss
             state_info['sdf_asap_loss'] = sdf_asap_loss.item()
 
         batch_dict["loss"] = loss
 
+    def get_ndpd(self, sdfs: torch.Tensor, min_persistence=0.0):
+        # import ipdb; ipdb.set_trace()
+        # sdf.shape: (B, meshgrid_size, meshgrid_size, meshgrid_size)
+        dgms, _ = self.topology_PD_loss(sdfs) 
+        res = []
+        for dgm in dgms:
+            inds = torch.all(torch.all(torch.isfinite(dgm), dim=2), dim=0)
+            fh = dgm[:, inds, ...]
+            diag = fh[:, :, 0] - fh[:, :, 1]
+            res.append(fh[:, torch.any(diag > min_persistence, axis=0), ...])
+        return res
+
+    def get_PD_loss(self, time):
+        
+        batch_size = time.shape[0]
+        sdf_topo_loss = torch.zeros(1).to(time.device) 
+
+        if self.config.loss.topo.PD_loss_type == 'random':
+            time = (np.random.rand()*torch.ones_like(time)).to(time.device) 
+        elif self.config.loss.topo.PD_loss_type == 'identical':
+            pass
+        else:
+            raise NotImplementedError
+        
+        x_range, y_range, z_range = self.config.loss.get('x_range', [-1, 1]), self.config.loss.get('y_range', [-1, 1]), self.config.loss.get('z_range', [-1, 1])
+        sdfs = implicit_utils.sdf_from_lats(self, time, resolution=self.config.loss.topo.meshgrid_size, voxel_size=None,
+                                                        max_batch=int(2 ** 12), offset=None, scale=None, points_for_bound=None, verbose=False,
+                                                        x_range=x_range, y_range=y_range, z_range=z_range)
+        
+        # sdf.shape = (B, meshgrid_size, meshgrid_size, meshgrid_size)
+        dgms = self.get_ndpd(-sdfs.contiguous())
+        # import ipdb; ipdb.set_trace()
+        # ----------------------------------------------- group_num 相邻, 隔一个, 隔两个 ------------------------------------------------------------ #
+        Group_num = 3
+        for idx in range(Group_num):
+            chamfer_distance_1 = chamfer_distance(dgms[0][idx+1:], dgms[0][:-idx-1], batch_reduction='mean')[0]
+            chamfer_distance_2 = chamfer_distance(dgms[1][idx+1:], dgms[1][:-idx-1], batch_reduction='mean')[0]
+            chamfer_distance_3 = chamfer_distance(dgms[2][idx+1:], dgms[2][:-idx-1], batch_reduction='mean')[0]  
+            sdf_topo_loss += (chamfer_distance_1 + chamfer_distance_2 + chamfer_distance_3)
+            # import ipdb; ipdb.set_trace()
+
+        return sdf_topo_loss
 
     def extract_iso_surface(self, batch_vecs, cfg, batch_dict=None):
         """
@@ -238,7 +440,12 @@ class ImplicitGenerator(nn.Module):
             else:
                 raise NotImplementedError
 
-            e = torch.linalg.eigvalsh(R).clamp(0)
+            # fp16
+            with autocast(enabled=False):
+                e = torch.linalg.eigvalsh(R.float()).clamp(0)
+
+            # default
+            # e = torch.linalg.eigvalsh(R).clamp(0)
             e = e ** 0.5
             trace = e.sum()
             trace_list.append(trace)

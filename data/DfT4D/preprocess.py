@@ -39,21 +39,20 @@ def as_mesh(scene_or_mesh):
 
 def preproces(shapeindex, datapath, skip,req_human = '',req_pose = ''):
     shapeindex = shapeindex - 1
-    output = os.path.join(datapath, 'registrations_processed_sal_sigma03')
     utils.mkdir_ifnotexists(output)
     global_shape_index = 0
-    for human in sorted(os.listdir(os.path.join(datapath, 'registrations'))):
+    for human in sorted(os.listdir(os.path.join(datapath, registration_path))):
         if 'DS' not in human:
             if human == req_human or req_human == '':
                 utils.mkdir_ifnotexists(os.path.join(output,human))
-                for pose in sorted(os.listdir(os.path.join(datapath, 'registrations', human))):
+                for pose in sorted(os.listdir(os.path.join(datapath, registration_path, human))):
                     if 'DS' not in pose:
             
                         if pose == req_pose or req_pose == '':
-                            source = os.path.join(datapath, 'registrations', human, pose)
+                            source = os.path.join(datapath, registration_path, human, pose)
                             utils.mkdir_ifnotexists(os.path.join(output, human, pose))
 
-                            for shape in sorted(os.listdir(os.path.join(datapath, 'registrations', human, pose))):
+                            for shape in sorted(os.listdir(os.path.join(datapath, registration_path, human, pose))):
                                 if 'DS' not in shape:
 
                                     if (shapeindex == global_shape_index or shapeindex == -1):
@@ -130,6 +129,7 @@ if __name__ == '__main__':
 
     '''
     Commands: python preprocess.py --datapath ./ --human bear --pose pose
+    Commands: python preprocess.py --datapath ./ --human bear --pose pose --merge True
     '''
 
 
@@ -139,10 +139,17 @@ if __name__ == '__main__':
     parser.add_argument('--skip', action="store_true",default=False)
     parser.add_argument('--human', type=str,default='')
     parser.add_argument('--pose', type=str, default='')
+    parser.add_argument('--merge', type=bool, default=False)
 
 
     opt = parser.parse_args()
 
+    if opt.merge:
+        registration_path = "merged_registrations"
+        output = os.path.join(opt.datapath, 'merged_registrations_processed_sal_sigma03')
+    else:
+        registration_path = "registrations"
+        output = os.path.join(opt.datapath, 'registrations_processed_sal_sigma03')
 
     preproces(opt.shapeindex,opt.datapath,opt.skip,opt.human,opt.pose)
     

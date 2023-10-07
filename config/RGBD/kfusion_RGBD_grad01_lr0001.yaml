@@ -1,8 +1,8 @@
 seed: 1
-dataset_type: DfT4D
-dataset_name: bear_Agression_0_31
-data_dir: ./data/DfT4D/${dataset_name}/
-work_dir: ./work_dir_my_dataset/${dataset_name}_test_udf/
+dataset_type: kfusion
+dataset_name: kfusion_snoopy
+data_dir: ./data/${dataset_type}/
+work_dir: ./${dataset_name}_work_dir/${dataset_type}/grad01_eikonal01_off5/
 latent_dim: 1  # 1 because only scalar time is used
 num_workers: 0 # 16
 
@@ -13,19 +13,19 @@ dataset:
     dataset_type: ${dataset_type}
     data_dir: ${data_dir}
 
-    sdf_dir: /home/xiaoyan/3D/gencorres/data/DfT4D
+    sdf_dir: ${data_dir}
 
     with_raw_mesh: True
-    raw_mesh_dir: ${data_dir}/registrations/
+    raw_mesh_dir: ${data_dir}/ply_w_normal_normalized/
 
     with_registration: False
-    registration_dir: ${data_dir}/registrations/
+    registration_dir: ${data_dir}/ply_w_normal_normalized/
 
-    template_path: ${data_dir}/registrations/bear/pose/0000.obj # template
+    template_path: ${data_dir}/ply_w_normal_normalized/000000.ply # template
     num_samples: 8192
     split_cfg:
-        train: train_32.json # split
-        test: train_32.json # split
+        train: train_30.json # split
+        test: train_30.json # split
 
 model: 
     sdf:
@@ -44,6 +44,7 @@ model:
                 type: 'frequency'
                 input_dim: 3
                 freq: 10
+        use_NGP: False
 loss:
     ###### sdf ######
     # SDF loss
@@ -51,28 +52,38 @@ loss:
     sdf_loss_type: 'L1'
     # sdf grad loss
     grad_loss_weight: 0.1
+    eikonal_loss_weight: 0.1
+    offsurface_loss_weight: 5
     # sdf surface ARAP loss
-    use_sdf_asap_epoch: 100000
+    use_sdf_asap_epoch: 1000
+    use_EDR: True
+    EDR_loss_weight: 0
     simplify_mesh: True
     implicit_reg_type: 'dense_inverse'
     sample_latent_space: True
     sample_latent_space_type: 'line' # normal, line
-    sdf_asap_weight: 0.1 # 0.001
-    weight_asap: 0
+    sdf_asap_weight: 0.001
+    weight_asap: 0.1
     mu_asap: 0.0001
     add_mu_diag_to_hessian: True
     sdf_grid_size: 50
-    x_range: [-0.7, 0.4]
-    y_range: [-1.1, 1.1]
-    z_range: [-0.8, 0.7]
+    x_range: [-0.5, 0.5] # [-0.4, 0.4]
+    y_range: [-0.7, 0.7] # [-0.8, 0.8]
+    z_range: [-0.7, 0.7] # [-0.7, 0.7]
+    topology_PD_loss: False
+    topo:
+        meshgrid_size: 18
+        PD_loss_weight: 1
+        PD_begin_epoch: 10000
+        PD_loss_type: identical
 
 
 optimization:
     sdf:
-        batch_size: 16
+        batch_size: 4
         lr: 0.001
-        gammas:     [ 0.5,  0.5,  0.5,  0.5,  0.5,  0.5,  0.5]
-        milestones: [1000, 2000, 3000, 4000, 5000, 6000, 7000]
+        gammas:    [ 0.5,  0.5,  0.5,  0.5,  0.5,  0.5,  0.5] # [ 0.5,  0.5,  0.5,  0.5,  0.5,  0.5,  0.5]
+        milestones: [1000, 2000, 3000, 4000, 5000, 6000, 7000] # [1000, 2000, 3000, 4000, 5000, 6000, 7000]
         num_epochs: 10001
         
         lat_vecs: # currently not used because we do not have leanable latents
@@ -84,7 +95,6 @@ optimization:
     
 log:
     log_batch_interval: 100
-    save_epoch_interval: 100
+    save_epoch_interval: 500
     save_latest_epoch_interval: 100
-
 

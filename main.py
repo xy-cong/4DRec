@@ -18,18 +18,24 @@ from utils import utils, mesh_sampling
 from utils.writer import Writer
 from utils.scheduler_utils import StepLRSchedule, MultiplicativeLRSchedule, adjust_learning_rate
 from utils import ddp_utils
-from train_eval_unit import train_one_epoch, interp_from_lat_vecs
+from train_eval_unit import train_one_epoch, interp_from_lat_vecs, evaluate_energy
 import datasets
 from pyutils import *
 
 from loguru import logger
 from omegaconf import OmegaConf
 
+from torch.cuda.amp import GradScaler
+
 
 def update_config_each_epoch(config, epoch):
+    # import ipdb; ipdb.set_trace()
     config.update({
         'use_sdf_grad': True,
         'use_sdf_asap': epoch >= config.loss.use_sdf_asap_epoch,
+        'use_EDR': config.loss.get("use_EDR", False),
+        'use_topo_PD': epoch >= config.loss.topo.PD_begin_epoch,
+        'use_colorsdf': config.model.sdf.get('use_colornet', False) and config.loss.get("color_weight", False) and config.loss.color_weight > 0.0
     })
     return config
 
@@ -125,7 +131,15 @@ def main(config):
     ##################################################
     #  setup learning rate scheduler and optimizer
     ##################################################
-    if config.mode == 'train':
+    if config.mode == 'train' and config.train_from_sdfnet_init:
+        lr_group_init_train = [ config.optimization[config.rep].lr]
+        opt_params_group_init_train = [ { "params": model.decoder.color_net.parameters(), "lr": config.optimization[config.rep].lr, } ]
+
+        scheduler_train = MultiplicativeLRSchedule(lr_group_init_train,
+                                                   config.optimization.sdf.gammas,
+                                                   config.optimization.sdf.milestones)
+        optimizer_train = torch.optim.Adam(opt_params_group_init_train)   
+    else:
         lr_group_init_train = [ config.optimization[config.rep].lr]
         opt_params_group_init_train = [ { "params": model.parameters(), "lr": config.optimization[config.rep].lr, } ]
 
@@ -133,6 +147,7 @@ def main(config):
                                                    config.optimization.sdf.gammas,
                                                    config.optimization.sdf.milestones)
         optimizer_train = torch.optim.Adam(opt_params_group_init_train)
+
 
     ##################################################
     #  setup writer and state_info
@@ -155,15 +170,25 @@ def main(config):
         end_epoch = config.optimization[config.rep].num_epochs
 
         if config.epoch_continue is not None:
-            start_epoch = 1 + writer.load_checkpoint(f"{ckpt_train_dir}/checkpoint_{config.epoch_continue:05d}.pt",
-                                                     model, lat_vecs, optimizer_train)
+            # import ipdb; ipdb.set_trace()
+            if config.train_from_merge:
+                start_epoch = 1 + writer.load_checkpoint_from_merge(f"{ckpt_train_dir}/checkpoint_{config.epoch_continue:05d}.pt",
+                                                        model, lat_vecs, optimizer_train)
+            elif config.train_from_sdfnet_init:
+                start_epoch = 1 + writer.load_colorsdf_checkpoint(f"{ckpt_train_dir}/checkpoint_{config.epoch_continue:05d}.pt",
+                                                        model, lat_vecs)
+            else:
+                start_epoch = 1 + writer.load_checkpoint(f"{ckpt_train_dir}/checkpoint_{config.epoch_continue:05d}.pt",
+                                                        model, lat_vecs, optimizer_train)       
+
             logger.info(f"continue to train from previous epoch = {start_epoch}")
 
         if config.dist_train:
             model = nn.parallel.DistributedDataParallel(model, device_ids=[config.local_rank])
         if config.data_parallel:
             model = torch.nn.DataParallel(model)
-
+        # start_epoch = 4000
+        scaler = GradScaler()
         for epoch in range(start_epoch, end_epoch):
             lr_group = adjust_learning_rate(scheduler_train, optimizer_train, epoch)
             state_info.update( {'epoch': epoch, 'lr': lr_group} )
@@ -173,10 +198,11 @@ def main(config):
             if train_sampler is not None:
                 train_sampler.set_epoch(epoch)
 
-            train_one_epoch(state_info, config, train_loader, model, lat_vecs, optimizer_train, writer)
+            train_one_epoch(state_info, config, train_loader, model, lat_vecs, optimizer_train, writer, scaler)
 
             # save checkpoint
             if config.local_rank == 0:
+                # import ipdb; ipdb.set_trace()
                 model_module = model.module if config.dist_train or config.data_parallel else model 
                 if (epoch + 1) % config.log.save_epoch_interval == 0: 
                     writer.save_checkpoint(f"{ckpt_train_dir}/checkpoint_{epoch:05d}.pt", epoch, model_module, lat_vecs, optimizer_train)
@@ -197,8 +223,9 @@ def main(config):
             raise ValueError("split is train or test")
         interp_loader = DataLoader(mesh_sdf_dataset, batch_size=1, shuffle=False, pin_memory=True, num_workers=config.num_workers, 
                                    collate_fn=mesh_sdf_dataset.collate_batch if hasattr(mesh_sdf_dataset, 'collate_batch') else None)
-
+        
         epoch = config.epoch_continue
+        config = update_config_each_epoch(config, epoch)
 
         results_dir = f"{exp_dir}/results/{config.split}/{config.mode}_{config.rep}/{epoch}"
         if config.auto_decoder:
@@ -214,8 +241,23 @@ def main(config):
         results_dir = get_directory(results_dir)
 
         interp_from_lat_vecs(state_info, config, interp_loader, model, interp_lat_vecs, results_dir)
+    
+    elif config.mode in ['evaluate']:
+        interp_lat_vecs = torch.nn.Embedding(len(test_mesh_sdf_dataset), config.latent_dim).to(device) if config.auto_decoder else None
+        mesh_sdf_dataset = test_mesh_sdf_dataset
 
+        evaluate_loader = DataLoader(mesh_sdf_dataset, batch_size=4, shuffle=False, pin_memory=True, num_workers=config.num_workers,
+                                      collate_fn=mesh_sdf_dataset.collate_batch if hasattr(mesh_sdf_dataset, 'collate_batch') else None)
 
+        epoch = config.epoch_continue
+
+        writer.load_checkpoint(f"{log_dir}/ckpt_train/{config.rep}/checkpoint_{config.epoch_continue:05d}.pt", model)
+        state_info['epoch'] = epoch
+        model_2 = Net(config=config, dataset=train_mesh_sdf_dataset)
+        model_2 = model_2.to(device)
+        writer.load_checkpoint("/home/xiaoyan/3D/gencorres/work_dir/bear_Agression_full/DfT4D/bear/tbase/ad_bear_grad01_lr0001/log/ckpt_train/sdf/checkpoint_09999.pt", model_2)
+        config = update_config_each_epoch(config, epoch)
+        evaluate_energy(state_info, config, evaluate_loader, model, model_2)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -242,6 +284,10 @@ if __name__ == '__main__':
     # use test_opt model
     parser.add_argument('--use_test_opt_model', action='store_true', help='all model and dir are primarily based on test_opt model')
     parser.add_argument("--test_opt_epoch", type=int, help='epoch of test_opt')
+
+    parser.add_argument("--train_from_merge", action='store_true', help='3 steps in total: 1. merge initialization 2. fit 3. arap')
+    parser.add_argument("--train_from_sdfnet_init", action='store_true', help='use pretrained sdfnet ckpt')
+
     args = parser.parse_args()
 
     config = OmegaConf.load(args.config_path)

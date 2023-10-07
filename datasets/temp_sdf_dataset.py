@@ -46,7 +46,7 @@ class TempSdfDataset(torch.utils.data.Dataset):
 
         self.data_dir = config.data_dir
         self.sdf_dir = config.sdf_dir
-        self.raw_mesh_dir = config.raw_mesh_dir
+        # self.raw_mesh_dir = config.raw_mesh_dir
         self.registration_dir = config.registration_dir
         self.num_samples = config.num_samples
         self.template_path = config.template_path
@@ -118,7 +118,6 @@ class TempSdfDataset(torch.utils.data.Dataset):
                 self.verts_raw_list.append(mesh_raw.vertices.astype(np.float32))
                 self.faces_raw_list.append(mesh_raw.faces)
 
-
     def get_fid_list(self, split_names):
         fid_list = []
         assert(len(split_names) == 1)
@@ -157,6 +156,8 @@ class TempSdfDataset(torch.utils.data.Dataset):
 
             point_set_mnfld = torch.from_numpy(np.load(f"{self.sdf_dir}/{fname}.npy")).float()
             samples_nonmnfld = torch.from_numpy(np.load(f"{self.sdf_dir}/{fname}_dist_triangle.npy")).float()
+
+            # import ipdb; ipdb.set_trace()
 
             random_idx = (torch.rand(self.num_samples) * point_set_mnfld.shape[0]).long()
             point_set_mnfld = torch.index_select(point_set_mnfld, 0, random_idx)

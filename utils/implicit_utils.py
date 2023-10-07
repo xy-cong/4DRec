@@ -42,6 +42,84 @@ def sdf_decode_mesh_from_single_lat(model, latent_vec, resolution=256, voxel_siz
 
     return verts, faces
 
+def color_sdf_decode_mesh_from_single_lat(model, latent_vec, resolution=256, voxel_size=None, max_batch=int(2 ** 18), offset=None, scale=None, points_for_bound=None, verbose=False, x_range=[-1, 1], y_range=[-0.7, 1.7], z_range=[-1.1, 0.9]):
+    '''
+    Args:
+        model: only model.decoder is used
+        resolution: the resolution of the shortest_axis
+        latent_vec: (d, )
+    '''
+    if resolution is not None:
+        assert(voxel_size is None)
+        if points_for_bound is not None:
+            grid = get_grid_YXZ(points_for_bound, resolution)
+        else:
+            grid = get_grid_uniform_YXZ(resolution, x_range=x_range, y_range=y_range, z_range=z_range)
+    else:
+        assert(voxel_size is not None)
+        grid = get_grid_from_size_YXZ(points_for_bound, voxel_size)
+
+    sdf_volume_yxz = []
+    ptn_samples_list = torch.split(grid['grid_points'], max_batch, dim=0)
+    if verbose:
+        ptn_samples_list = tqdm(ptn_samples_list)
+    for ptn_samples in ptn_samples_list:
+        ptn_samples.requires_grad = False
+        sdf_samples = model.decoder(ptn_samples[None, :, :].to(latent_vec.device), latent_vec[None, :])
+        sdf_samples = sdf_samples[0, :, 0].detach().cpu().numpy()
+        sdf_volume_yxz.append(sdf_samples)
+
+    sdf_volume = np.concatenate(sdf_volume_yxz, axis=0).reshape(grid['ysize'], grid['xsize'], grid['zsize']).transpose([1, 0, 2]) # XYZ
+    # import ipdb; ipdb.set_trace()
+    assert(np.min(sdf_volume) < 0 and np.max(sdf_volume) > 0)
+
+    verts, faces = convert_sdf_volume_to_verts_faces(sdf_volume, grid['voxel_grid_origin'], grid['voxel_size'])
+
+    verts_list = torch.split(torch.from_numpy(verts), max_batch, dim=0)
+    colors = []
+    if verbose:
+        verts_list = tqdm(verts_list)
+    for vert in verts_list:
+        vert.requires_grad = False
+        ret = model.decoder(vert[None, :, :].to(latent_vec.device).float(), latent_vec[None, :])
+        color = ret[0, :, 1:].detach().cpu().numpy()
+        colors.append(color)
+    colors = np.concatenate(colors, axis=0)
+    return verts, faces, colors
+
+def sdf_from_lats(model, latent_vecs, resolution=256, voxel_size=None, max_batch=int(2 ** 18), offset=None, scale=None, points_for_bound=None, verbose=False, x_range=[-1, 1], y_range=[-0.7, 1.7], z_range=[-1.1, 0.9]):
+    '''
+    Args:
+        model: only model.decoder is used
+        resolution: the resolution of the shortest_axis
+        latent_vecs: (n, d)
+    '''
+    
+    if resolution is not None:
+        assert(voxel_size is None)
+        if points_for_bound is not None:
+            grid = get_grid_YXZ(points_for_bound, resolution)
+        else:
+            grid = get_grid_uniform_YXZ(resolution, x_range=x_range, y_range=y_range, z_range=z_range)
+    else:
+        assert(voxel_size is not None)
+        grid = get_grid_from_size_YXZ(points_for_bound, voxel_size)
+
+    sdf_volume_yxz = []
+    ptn_samples_list = torch.split(grid['grid_points'], max_batch, dim=0)
+    if verbose:
+        ptn_samples_list = tqdm(ptn_samples_list)
+    for ptn_samples in ptn_samples_list:
+        ptn_samples.requires_grad = False
+        sdf_samples = model.decoder(ptn_samples.unsqueeze(0).repeat(latent_vecs.shape[0], 1, 1).to(latent_vecs.device), latent_vecs)
+        sdf_samples = sdf_samples[:, :, 0].detach().cpu().numpy()
+        sdf_volume_yxz.append(sdf_samples)
+
+    sdf_volume = np.concatenate(sdf_volume_yxz, axis=1).reshape(latent_vecs.shape[0], grid['ysize'], grid['xsize'], grid['zsize']).transpose([0, 2, 1, 3]) # XYZ
+
+    return torch.from_numpy(sdf_volume).to(latent_vecs.device)
+
+
 
 def convert_sdf_volume_to_verts_faces(sdf_volume, voxel_grid_origin, voxel_size, offset=None, scale=None):
     """

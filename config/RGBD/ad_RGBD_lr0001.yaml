@@ -1,8 +1,8 @@
 seed: 1
-dataset_type: DfT4D
-dataset_name: bear_Agression_0_31
-data_dir: ./data/DfT4D/${dataset_name}/
-work_dir: ./work_dir_my_dataset/${dataset_name}_test_udf/
+dataset_type: RGBD
+dataset_name: 171026_pose3
+data_dir: ./data/${dataset_type}/
+work_dir: ./RGBD_work_dir/${dataset_type}/${dataset_name}/
 latent_dim: 1  # 1 because only scalar time is used
 num_workers: 0 # 16
 
@@ -13,7 +13,7 @@ dataset:
     dataset_type: ${dataset_type}
     data_dir: ${data_dir}
 
-    sdf_dir: /home/xiaoyan/3D/gencorres/data/DfT4D
+    sdf_dir: ${data_dir}
 
     with_raw_mesh: True
     raw_mesh_dir: ${data_dir}/registrations/
@@ -21,11 +21,11 @@ dataset:
     with_registration: False
     registration_dir: ${data_dir}/registrations/
 
-    template_path: ${data_dir}/registrations/bear/pose/0000.obj # template
+    template_path: ${data_dir}/processed_plys/000000.ply # template
     num_samples: 8192
     split_cfg:
-        train: train_32.json # split
-        test: train_32.json # split
+        train: train_64.json # split
+        test: train_64.json # split
 
 model: 
     sdf:
@@ -50,14 +50,14 @@ loss:
     sdf_weight: 1.0
     sdf_loss_type: 'L1'
     # sdf grad loss
-    grad_loss_weight: 0.1
+    grad_loss_weight: 0
     # sdf surface ARAP loss
-    use_sdf_asap_epoch: 100000
+    use_sdf_asap_epoch: 10000
     simplify_mesh: True
     implicit_reg_type: 'dense_inverse'
     sample_latent_space: True
     sample_latent_space_type: 'line' # normal, line
-    sdf_asap_weight: 0.1 # 0.001
+    sdf_asap_weight: 0.001
     weight_asap: 0
     mu_asap: 0.0001
     add_mu_diag_to_hessian: True
@@ -84,7 +84,7 @@ optimization:
     
 log:
     log_batch_interval: 100
-    save_epoch_interval: 100
+    save_epoch_interval: 500
     save_latest_epoch_interval: 100
 
 

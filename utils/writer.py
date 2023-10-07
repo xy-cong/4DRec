@@ -73,3 +73,43 @@ class Writer():
         logger.info("loaded!")
         return ckpt["epoch"]
 
+    def load_colorsdf_checkpoint(self, ckpt_path, model=None, latent_vecs=None):
+        # in-place load
+        
+        ckpt = torch.load(ckpt_path, map_location=torch.device('cpu'))
+        new_ckpt = {}
+        for key, value in ckpt["model_state_dict"].items():
+            # 创建一个新的键，它是原始键前面加上'bbb.'
+            if 'decoder' in key:
+                new_key = key.split('.')[1] + '.' + key.split('.')[2]
+            else:
+                new_key = key
+            # 将修改后的键和原始值添加到新的字典中
+            new_ckpt[new_key] = value
+        ckpt["model_state_dict"] = new_ckpt
+        # import ipdb; ipdb.set_trace()
+        if model is not None:
+            logger.info(f"load model from ${ckpt_path}")
+            model.decoder.sdf_net.load_state_dict(ckpt["model_state_dict"])
+        if latent_vecs is not None:
+            logger.info(f"load lat_vecs from ${ckpt_path}")
+            latent_vecs.load_state_dict(ckpt["train_latent_vecs"])
+        logger.info("loaded!")
+        return 0
+
+
+    def load_checkpoint_from_merge(self, ckpt_path, model=None, latent_vecs=None, optimizer=None):
+        # in-place load
+        ckpt = torch.load(ckpt_path, map_location=torch.device('cpu'))
+        if model is not None:
+            logger.info(f"load model from ${ckpt_path}")
+            model.load_state_dict(ckpt["model_state_dict"])
+        # if latent_vecs is not None:
+        #     logger.info(f"load lat_vecs from ${ckpt_path}")
+        #     latent_vecs.load_state_dict(ckpt["train_latent_vecs"])
+        # if optimizer is not None:
+        #     logger.info(f"load optimizer from ${ckpt_path}")
+        #     optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        logger.info(f'loaded merge epoch {ckpt["epoch"]}! train from epoch 0!')
+        return 0
+

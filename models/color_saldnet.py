@@ -5,9 +5,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import distributions as dist
-
+import tinycudann as tcnn
 from models.encoder import get_encoder
 
+import tinycudann as tcnn
 
 def maxpool(x, dim=-1, keepdim=False):
     out, _ = x.max(dim=dim, keepdim=keepdim)
@@ -68,17 +69,17 @@ class SimplePointnet(nn.Module):
         return c_mean, c_std
 
 
-class ImplicitMap(nn.Module):
+class Implicit_Map(nn.Module):
     def __init__(
         self,
         latent_size,
         dims,
         norm_layers=(),
         latent_in=(),
-        output_dim=1,
         weight_norm=False,
         activation=None,
         xyz_dim=3,
+        out_dim=1,
         geometric_init=True,
         beta=100,
         use_encoder=False,
@@ -95,8 +96,8 @@ class ImplicitMap(nn.Module):
             self.encoder, xyz_dim = get_encoder(encoder)
 
 
-        last_out_dim = output_dim
-        dims = [latent_size + xyz_dim] + list(dims) + [last_out_dim]
+        last_out_dim = out_dim
+        dims = [latent_size + xyz_dim] + list(dims) + [out_dim]
         self.d_in = latent_size + xyz_dim
         self.latent_in = latent_in
         self.num_layers = len(dims)
@@ -116,22 +117,6 @@ class ImplicitMap(nn.Module):
                 else:
                     torch.nn.init.constant_(lin.bias, 0.0)
                     torch.nn.init.normal_(lin.weight, 0.0, np.sqrt(2) / np.sqrt(out_dim))
-            # if geometric_init:
-            #     if l == self.num_layers - 2:
-            #         torch.nn.init.normal_(lin.weight, mean=np.sqrt(np.pi) / np.sqrt(dims[l]), std=0.0001)
-            #         torch.nn.init.constant_(lin.bias, -bias)
-            #     elif l == 0:
-            #         torch.nn.init.constant_(lin.bias, 0.0)
-            #         torch.nn.init.constant_(lin.weight[:, 3:], 0.0)
-            #         torch.nn.init.normal_(lin.weight[:, :3], 0.0, np.sqrt(2) / np.sqrt(out_dim))
-            #     elif l in self.latent_in:
-            #         torch.nn.init.constant_(lin.bias, 0.0)
-            #         torch.nn.init.normal_(lin.weight, 0.0, np.sqrt(2) / np.sqrt(out_dim))
-            #         torch.nn.init.constant_(lin.weight[:, -(dims[0] - 3):], 0.0)
-            #     else:
-            #         torch.nn.init.constant_(lin.bias, 0.0)
-            #         torch.nn.init.normal_(lin.weight, 0.0, np.sqrt(2) / np.sqrt(out_dim))
-
             if weight_norm:
                 lin = nn.utils.weight_norm(lin)
 
@@ -139,7 +124,6 @@ class ImplicitMap(nn.Module):
 
         self.softplus = nn.Softplus(beta=beta)
         self.relu = nn.ReLU()
-        
 
     def forward(self, inputs, latent):
         '''
@@ -163,7 +147,7 @@ class ImplicitMap(nn.Module):
             inputs_con = latent
         else:
             raise AssertionError
-        # import ipdb; ipdb.set_trace()
+        
         if self.use_encoder:
             inputs = self.encoder(inputs)
         
@@ -185,3 +169,106 @@ class ImplicitMap(nn.Module):
         return x
 
 
+class Color_NGP(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.color_encoder = tcnn.Encoding(
+            n_input_dims=4,
+            encoding_config={
+                "otype": "HashGrid",
+                "n_levels": 16, # 16
+                "n_features_per_level": 2, # 2
+                "log2_hashmap_size": 19,
+                "base_resolution": 16,
+                "per_level_scale": 1.3819,
+            },
+        )
+        self.color_backbone = nn.Sequential(
+                nn.Linear(32, 64),
+                nn.GELU(),
+                nn.Linear(64, 64),
+                nn.GELU(),
+                nn.Linear(64, 3)
+            )
+        
+    def forward(self, inputs, latent):
+        assert(len(latent.shape) == 2)
+        assert(latent.shape[0] == inputs.shape[0])
+        if len(inputs.shape) == 3:
+            # inputs: (B, N, 3), latent: (B, din)
+            B, N = inputs.shape[0], inputs.shape[1]
+            inputs_con = latent.unsqueeze(1).repeat(1, N, 1) # (B, N, din)
+        elif len(inputs.shape) == 2:
+            # inputs: (N1+...+NB, 3), latent: (N1+...+NB, din)
+            inputs_con = latent
+        else:
+            raise AssertionError
+        
+        x = torch.cat([inputs, inputs_con], dim=-1) # (B, N, din + 3) or (N1+...+NB, din+3)
+        x = (x+1)/2
+        x = x.reshape(-1, 4)
+        color_enc = self.color_encoder(x).float()
+        color = self.color_backbone(color_enc)
+        return color.reshape(B, N, 3)
+
+class Implicit_Color_Map(nn.Module):
+    def __init__(
+        self,
+        latent_size,
+        dims,
+        norm_layers=(),
+        latent_in=(),
+        weight_norm=False,
+        activation=None,
+        xyz_dim=3,
+        geometric_init=True,
+        beta=100,
+        use_encoder=False,
+        encoder=None,
+        colornet=None,
+        **kwargs
+    ):
+        super().__init__()
+
+        self.sdf_net = Implicit_Map(
+            latent_size=latent_size,
+            dims=dims,
+            norm_layers=norm_layers,
+            latent_in=latent_in,
+            weight_norm=weight_norm,
+            activation=activation,
+            xyz_dim=xyz_dim,
+            out_dim=1,
+            geometric_init=geometric_init,
+            beta=100,
+            use_encoder=use_encoder,
+            encoder=encoder
+        )
+
+        self.color_net = Color_NGP()
+
+        # self.color_net = Implicit_Map(
+        #     latent_size=latent_size,
+        #     dims=dims,
+        #     norm_layers=norm_layers,
+        #     latent_in=latent_in,
+        #     weight_norm=weight_norm,
+        #     activation=activation,
+        #     xyz_dim=xyz_dim,
+        #     out_dim=3,
+        #     geometric_init=geometric_init,
+        #     beta=100,
+        #     use_encoder=use_encoder,
+        #     encoder=encoder
+        # )
+
+        self.softplus = nn.Softplus(beta=beta)
+
+    def forward(self, inputs, latent):
+        # import ipdb; ipdb.set_trace()
+        
+        color = self.color_net(inputs, latent)
+        sdf = self.sdf_net(inputs, latent)
+        # sdf = torch.ones_like(color)
+        ret = torch.cat([sdf, color], axis=-1)
+        return ret

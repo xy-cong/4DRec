@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import distributions as dist
+import tinycudann as tcnn
 
 from models.encoder import get_encoder
 
@@ -68,14 +69,13 @@ class SimplePointnet(nn.Module):
         return c_mean, c_std
 
 
-class ImplicitMap(nn.Module):
+class NGP(nn.Module):
     def __init__(
         self,
         latent_size,
         dims,
         norm_layers=(),
         latent_in=(),
-        output_dim=1,
         weight_norm=False,
         activation=None,
         xyz_dim=3,
@@ -95,51 +95,32 @@ class ImplicitMap(nn.Module):
             self.encoder, xyz_dim = get_encoder(encoder)
 
 
-        last_out_dim = output_dim
+        last_out_dim = 1
         dims = [latent_size + xyz_dim] + list(dims) + [last_out_dim]
         self.d_in = latent_size + xyz_dim
         self.latent_in = latent_in
         self.num_layers = len(dims)
 
-        for l in range(0, self.num_layers - 1):
-            if l + 1 in latent_in:
-                out_dim = dims[l + 1] - dims[0]
-            else:
-                out_dim = dims[l + 1]
+        self.xyzt_encoder = tcnn.Encoding(
+            n_input_dims=4,
+            encoding_config={
+                "otype": "HashGrid",
+                "n_levels": 16, # 16
+                "n_features_per_level": 2, # 2
+                "log2_hashmap_size": 19,
+                "base_resolution": 16,
+                "per_level_scale": 1.3819,
+            },
+        )
+        # self.softplus = nn.Softplus(beta=beta)
 
-            lin = nn.Linear(dims[l], out_dim)
-
-            if geometric_init:
-                if l == self.num_layers - 2:
-                    torch.nn.init.normal_(lin.weight, mean=np.sqrt(np.pi) / np.sqrt(dims[l]), std=0.0001)
-                    torch.nn.init.constant_(lin.bias, -bias)
-                else:
-                    torch.nn.init.constant_(lin.bias, 0.0)
-                    torch.nn.init.normal_(lin.weight, 0.0, np.sqrt(2) / np.sqrt(out_dim))
-            # if geometric_init:
-            #     if l == self.num_layers - 2:
-            #         torch.nn.init.normal_(lin.weight, mean=np.sqrt(np.pi) / np.sqrt(dims[l]), std=0.0001)
-            #         torch.nn.init.constant_(lin.bias, -bias)
-            #     elif l == 0:
-            #         torch.nn.init.constant_(lin.bias, 0.0)
-            #         torch.nn.init.constant_(lin.weight[:, 3:], 0.0)
-            #         torch.nn.init.normal_(lin.weight[:, :3], 0.0, np.sqrt(2) / np.sqrt(out_dim))
-            #     elif l in self.latent_in:
-            #         torch.nn.init.constant_(lin.bias, 0.0)
-            #         torch.nn.init.normal_(lin.weight, 0.0, np.sqrt(2) / np.sqrt(out_dim))
-            #         torch.nn.init.constant_(lin.weight[:, -(dims[0] - 3):], 0.0)
-            #     else:
-            #         torch.nn.init.constant_(lin.bias, 0.0)
-            #         torch.nn.init.normal_(lin.weight, 0.0, np.sqrt(2) / np.sqrt(out_dim))
-
-            if weight_norm:
-                lin = nn.utils.weight_norm(lin)
-
-            setattr(self, "lin" + str(l), lin)
-
-        self.softplus = nn.Softplus(beta=beta)
-        self.relu = nn.ReLU()
-        
+        self.backbone = nn.Sequential(
+                nn.Linear(32, 64),
+                nn.ReLU(),
+                nn.Linear(64, 64),
+                nn.ReLU(),
+                nn.Linear(64, 1)
+            )
 
     def forward(self, inputs, latent):
         '''
@@ -148,8 +129,6 @@ class ImplicitMap(nn.Module):
             latent: (B, din) or (N1+...+NB, din)
         return:
             x: (B, N, 1) or (N1+...+NB, 1)
-            of
-            x: (B, N, 4) or (N1+...+NB, 4)
         '''
         assert(self.latent_size > 0)
         assert(len(latent.shape) == 2)
@@ -164,23 +143,12 @@ class ImplicitMap(nn.Module):
         else:
             raise AssertionError
         # import ipdb; ipdb.set_trace()
-        if self.use_encoder:
-            inputs = self.encoder(inputs)
-        
         x = torch.cat([inputs, inputs_con], dim=-1) # (B, N, din + 3) or (N1+...+NB, din+3)
-
-        to_cat = x
-
-        for l in range(0, self.num_layers - 1):
-            lin = getattr(self, "lin" + str(l))
-
-            if l in self.latent_in:
-                x = torch.cat([x, to_cat], -1) / np.sqrt(2)
-
-            x = lin(x)
-
-            if l < self.num_layers - 2:
-                x = self.softplus(x)
+        x = (x + 1) / 2
+        x = x.reshape(-1, 4)
+        x = self.xyzt_encoder(x).float()
+        x = self.backbone(x)
+        x = x.reshape(B, N, 1)
 
         return x
 
